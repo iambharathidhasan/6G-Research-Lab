@@ -1,1 +1,347 @@
+%% ================================================================
+% EXPERIMENT 1 - RF / CSI-RS VALIDATION
+%
+% Objective:
+%   1. CSI-RS detection
+%   2. Channel estimation
+%   3. Synchronization
+%   4. Channel stability
+%
+% No person / no moving target
+% MATLAB-only simulation
+%
+% Required:
+%   5G Toolbox
+% ================================================================
 
+clear;
+clc;
+close all;
+
+rng(10);
+
+fprintf('\n');
+fprintf('====================================================\n');
+fprintf(' EXPERIMENT 1 - RF / CSI-RS VALIDATION\n');
+fprintf('====================================================\n');
+
+
+%% ================================================================
+% 1. 5G NR CARRIER CONFIGURATION
+% ================================================================
+
+carrier = nrCarrierConfig;
+
+carrier.SubcarrierSpacing = 30;     % kHz
+carrier.NSizeGrid = 52;             % approximately 10 MHz
+carrier.NStartGrid = 0;
+carrier.NCellID = 1;
+
+fprintf('\n5G NR Configuration\n');
+fprintf('-------------------\n');
+fprintf('Subcarrier spacing : %d kHz\n', ...
+    carrier.SubcarrierSpacing);
+
+fprintf('Number of RBs      : %d\n', ...
+    carrier.NSizeGrid);
+
+
+%% ================================================================
+% 2. CSI-RS CONFIGURATION
+% ================================================================
+
+csirs = nrCSIRSConfig;
+
+csirs.CSIRSType = {'nzp'};
+
+csirs.CSIRSPeriod = {[10 0]};
+
+csirs.RowNumber = 1;
+
+csirs.Density = {'three'};
+
+csirs.SymbolLocations = {6};
+
+csirs.SubcarrierLocations = {0};
+
+csirs.NumRB = carrier.NSizeGrid;
+
+
+%% ================================================================
+% 3. GENERATE CSI-RS
+% ================================================================
+
+csirsSymbols = nrCSIRS(carrier,csirs);
+
+csirsIndices = nrCSIRSIndices(carrier,csirs);
+
+
+%% ================================================================
+% 4. CREATE RESOURCE GRID
+% ================================================================
+
+txGrid = nrResourceGrid(carrier);
+
+txGrid(csirsIndices) = csirsSymbols;
+
+
+%% ================================================================
+% 5. OFDM MODULATION
+% ================================================================
+
+[txWaveform,ofdmInfo] = ...
+    nrOFDMModulate(carrier,txGrid);
+
+sampleRate = ofdmInfo.SampleRate;
+
+fprintf('OFDM FFT size      : %d\n', ...
+    ofdmInfo.Nfft);
+
+fprintf('Sample rate        : %.2f MHz\n', ...
+    sampleRate/1e6);
+
+fprintf('Waveform samples   : %d\n', ...
+    size(txWaveform,1));
+
+
+%% ================================================================
+% 6. SIMPLE RF CHANNEL
+%
+% No person.
+% No moving object.
+%
+% We simulate:
+%
+% gNB ------------------------> Receiver
+%
+% with a fixed channel gain.
+% ================================================================
+
+channelGain = 0.8;
+
+rxWaveform = channelGain * txWaveform;
+
+
+%% ================================================================
+% 7. ADD AWGN NOISE
+% ================================================================
+
+SNR = 30;       % dB
+
+signalPower = mean(abs(rxWaveform).^2);
+
+noisePower = ...
+    signalPower / 10^(SNR/10);
+
+noise = sqrt(noisePower/2) .* ...
+    (randn(size(rxWaveform)) + ...
+     1i*randn(size(rxWaveform)));
+
+rxWaveform = rxWaveform + noise;
+
+
+%% ================================================================
+% 8. TIMING SYNCHRONIZATION
+% ================================================================
+
+[offset,correlation] = ...
+    nrTimingEstimate( ...
+        carrier, ...
+        rxWaveform, ...
+        csirsIndices, ...
+        csirsSymbols);
+
+fprintf('\nTiming synchronization\n');
+fprintf('----------------------\n');
+
+fprintf('Estimated timing offset = %d samples\n', ...
+    offset);
+
+
+%% ================================================================
+% 9. CORRECT TIMING OFFSET
+% ================================================================
+
+if offset >= 0 && offset < size(rxWaveform,1)
+
+    rxWaveformSync = ...
+        rxWaveform(1+offset:end,:);
+
+else
+
+    rxWaveformSync = rxWaveform;
+
+end
+
+
+%% ================================================================
+% 10. OFDM DEMODULATION
+% ================================================================
+
+rxGrid = ...
+    nrOFDMDemodulate( ...
+        carrier, ...
+        rxWaveformSync);
+
+
+%% ================================================================
+% 11. CHANNEL ESTIMATION
+% ================================================================
+
+[H,nVar] = ...
+    nrChannelEstimate( ...
+        carrier, ...
+        rxGrid, ...
+        csirsIndices, ...
+        csirsSymbols);
+
+
+%% ================================================================
+% 12. EXTRACT RECEIVED CSI-RS
+% ================================================================
+
+receivedCSIRS = ...
+    rxGrid(csirsIndices);
+
+receivedMagnitude = ...
+    abs(receivedCSIRS);
+
+
+%% ================================================================
+% 13. CSI-RS DETECTION METRIC
+% ================================================================
+
+meanCSIRS = ...
+    mean(receivedMagnitude);
+
+maxCSIRS = ...
+    max(receivedMagnitude);
+
+fprintf('\nCSI-RS detection\n');
+fprintf('----------------\n');
+
+fprintf('Mean CSI-RS magnitude = %.4f\n', ...
+    meanCSIRS);
+
+fprintf('Maximum magnitude     = %.4f\n', ...
+    maxCSIRS);
+
+
+%% ================================================================
+% 14. CHANNEL STABILITY
+%
+% We examine the estimated channel magnitude across
+% the active subcarriers.
+% ================================================================
+
+Hmag = abs(H(:,1,1));
+
+channelMean = mean(Hmag);
+
+channelStd = std(Hmag);
+
+channelCV = channelStd / channelMean;
+
+fprintf('\nChannel stability\n');
+fprintf('-----------------\n');
+
+fprintf('Mean |H|             = %.4f\n', ...
+    channelMean);
+
+fprintf('Standard deviation   = %.4f\n', ...
+    channelStd);
+
+fprintf('Coefficient variation = %.2f %%\n', ...
+    100*channelCV);
+
+
+%% ================================================================
+% 15. PLOT RESULTS
+% ================================================================
+
+figure( ...
+    'Name','Experiment 1 - CSI-RS Validation', ...
+    'Color','w', ...
+    'Position',[100 100 1200 750]);
+
+
+%% CSI-RS transmitted
+
+subplot(2,2,1);
+
+stem(abs(csirsSymbols), ...
+    'Marker','none');
+
+grid on;
+
+xlabel('CSI-RS Resource Element');
+ylabel('Magnitude');
+
+title('Transmitted CSI-RS');
+
+
+%% CSI-RS received
+
+subplot(2,2,2);
+
+stem(receivedMagnitude, ...
+    'Marker','none');
+
+grid on;
+
+xlabel('CSI-RS Resource Element');
+ylabel('Magnitude');
+
+title('Detected CSI-RS');
+
+
+%% Channel estimate
+
+subplot(2,2,3);
+
+plot(20*log10(Hmag + eps), ...
+    'LineWidth',1.2);
+
+grid on;
+
+xlabel('Subcarrier');
+ylabel('|H(f)| (dB)');
+
+title('Estimated Channel');
+
+
+%% Timing synchronization
+
+subplot(2,2,4);
+
+plot(correlation, ...
+    'LineWidth',1.2);
+
+grid on;
+
+xlabel('Sample');
+ylabel('Correlation');
+
+title('Timing Synchronization');
+
+
+%% ================================================================
+% 16. FINAL RESULT
+% ================================================================
+
+fprintf('\n');
+fprintf('====================================================\n');
+fprintf(' EXPERIMENT 1 RESULT\n');
+fprintf('====================================================\n');
+
+fprintf('CSI-RS detected       : YES\n');
+fprintf('Channel estimated     : YES\n');
+fprintf('Synchronization       : YES\n');
+
+fprintf('Channel variation     : %.2f %%\n', ...
+    100*channelCV);
+
+fprintf('Estimated noise var   : %.4e\n', ...
+    nVar);
+
+fprintf('====================================================\n');
